@@ -10,6 +10,7 @@ import {
 
 import {
   AddSongToQueueSchema,
+  PlayNowSchema,
   GoBackSchema,
   GoForwardScheme,
   MoveSongInQueueSchema,
@@ -21,6 +22,7 @@ import {
   SetVolumeSchema,
   SongInfoSchema,
   SwitchRepeatSchema,
+  PlayPlaylistSchema,
   type ResponseSongInfo,
 } from '../scheme';
 import { API_VERSION } from '../api-version';
@@ -471,6 +473,7 @@ const routes = {
       },
     },
   }),
+
   moveSongInQueue: createRoute({
     method: 'patch',
     path: `/api/${API_VERSION}/queue/{index}`,
@@ -562,6 +565,67 @@ const routes = {
             schema: z.object({}),
           },
         },
+      },
+    },
+  }),
+  playNow: createRoute({
+    method: 'post',
+    path: `/api/${API_VERSION}/play-now`,
+    summary: 'play song now',
+    description: 'Play a song immediately by adding it to the queue and jumping to it',
+    request: {
+      body: {
+        description: 'video id of the song to play',
+        content: {
+          'application/json': {
+            schema: PlayNowSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      204: {
+        description: 'Success',
+      },
+    },
+  }),
+  getPlaylists: createRoute({
+    method: 'get',
+    path: `/api/${API_VERSION}/playlists`,
+    summary: 'get user playlists',
+    description: 'Get the user\'s liked playlists from YouTube Music',
+    responses: {
+      200: {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: z.object({}),
+          },
+        },
+      },
+      204: {
+        description: 'No playlists found',
+      },
+    },
+  }),
+  playPlaylist: createRoute({
+    method: 'post',
+    path: `/api/${API_VERSION}/playlists/play`,
+    summary: 'play playlist',
+    description: 'Navigate to a playlist and start playing it',
+    request: {
+      body: {
+        description: 'playlist id to play',
+        content: {
+          'application/json': {
+            schema: PlayPlaylistSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      204: {
+        description: 'Success',
       },
     },
   }),
@@ -747,13 +811,16 @@ export const register = (
 
   // Queue
   const queueInfo = async (ctx: Context) => {
-    const queueResponsePromise = new Promise<QueueResponse>((resolve) => {
-      ipcMain.once('peard:get-queue-response', (_, queue: QueueResponse) => {
-        return resolve(queue);
-      });
+    const queueResponsePromise = Promise.race([
+      new Promise<QueueResponse>((resolve) => {
+        ipcMain.once('peard:get-queue-response', (_, queue: QueueResponse) => {
+          return resolve(queue);
+        });
 
-      controller.requestQueueInformation();
-    });
+        controller.requestQueueInformation();
+      }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
 
     const info = await queueResponsePromise;
 
@@ -769,13 +836,16 @@ export const register = (
   app.openapi(routes.queueInfo, queueInfo);
 
   app.openapi(routes.nextSongInfo, async (ctx) => {
-    const queueResponsePromise = new Promise<QueueResponse>((resolve) => {
-      ipcMain.once('peard:get-queue-response', (_, queue: QueueResponse) => {
-        return resolve(queue);
-      });
+    const queueResponsePromise = Promise.race([
+      new Promise<QueueResponse>((resolve) => {
+        ipcMain.once('peard:get-queue-response', (_, queue: QueueResponse) => {
+          return resolve(queue);
+        });
 
-      controller.requestQueueInformation();
-    });
+        controller.requestQueueInformation();
+      }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
 
     const queue = await queueResponsePromise;
 
@@ -824,6 +894,11 @@ export const register = (
     ctx.status(200);
     return ctx.json(nextSongInfo);
   });
+  app.openapi(routes.playNow, async (c) => {
+    const { videoId } = c.req.valid('json');
+    controller.playNow(videoId);
+    return c.body(null, 204);
+  });
 
   app.openapi(routes.addSongToQueue, (ctx) => {
     const { videoId, insertPosition } = ctx.req.valid('json');
@@ -866,5 +941,25 @@ export const register = (
 
     ctx.status(200);
     return ctx.json(response as object);
+  });
+
+  app.openapi(routes.getPlaylists, async (ctx) => {
+    const response = await controller.getPlaylists();
+
+    if (!response) {
+      ctx.status(204);
+      return ctx.body(null);
+    }
+
+    ctx.status(200);
+    return ctx.json(response as object);
+  });
+
+  app.openapi(routes.playPlaylist, (ctx) => {
+    const { playlistId } = ctx.req.valid('json');
+    controller.playPlaylist(playlistId);
+
+    ctx.status(204);
+    return ctx.body(null);
   });
 };

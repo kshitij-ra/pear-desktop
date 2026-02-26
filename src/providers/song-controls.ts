@@ -136,6 +136,13 @@ export const getSongControls = (win: BrowserWindow) => {
     },
     clearQueue: () => win.webContents.send('peard:clear-queue'),
 
+    playNow: (videoId: string) => {
+      const videoIdValue = parseStringFromArgsType(videoId);
+      if (videoIdValue === null) return;
+
+      win.webContents.send('peard:play-now', videoIdValue);
+    },
+
     search: (query: string, params?: string, continuation?: string) =>
       new Promise((resolve) => {
         ipcMain.once('peard:search-results', (_, result) => {
@@ -143,5 +150,20 @@ export const getSongControls = (win: BrowserWindow) => {
         });
         win.webContents.send('peard:search', query, params, continuation);
       }),
+
+    getPlaylists: () =>
+      new Promise((resolve) => {
+        ipcMain.once('peard:get-playlists-response', (_, result) => {
+          resolve(result as string);
+        });
+        win.webContents.send('peard:get-playlists');
+      }),
+
+    playPlaylist: (playlistId: string) => {
+      const playlistIdValue = parseStringFromArgsType(playlistId);
+      if (playlistIdValue === null) return;
+
+      win.webContents.send('peard:play-playlist', playlistIdValue);
+    },
   };
 };

@@ -83,6 +83,66 @@ async function onApiLoaded() {
   window.ipcRenderer.on('peard:play', (_) => {
     api?.playVideo();
   });
+  window.ipcRenderer.on('peard:play-now', async (_, videoId: string) => {
+    const queue = document.querySelector<QueueElement>('#queue');
+    const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
+    if (!queue || !app) return;
+
+    const store = queue.queue.store.store;
+    if (!store) return;
+
+    // Clear the current queue first
+    queue.dispatch({
+      type: 'CLEAR',
+    });
+
+    // Fetch and add the song
+    const queueContextParams = store.getState().queue.queueContextParams;
+    const result = await app.networkManager.fetch('/music/get_queue', {
+      queueContextParams,
+      videoIds: [videoId],
+    });
+
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      !('queueDatas' in result) ||
+      !Array.isArray((result as any).queueDatas)
+    ) {
+      return;
+    }
+
+    const newItems = (result as any).queueDatas
+      .map((it: any) =>
+        typeof it === 'object' && it && 'content' in it ? it.content : null,
+      )
+      .filter(Boolean);
+
+    if (!newItems.length) return;
+
+    // Add the song to queue
+    queue.dispatch({
+      type: 'ADD_ITEMS',
+      payload: {
+        nextQueueItemId: store.getState().queue.nextQueueItemId,
+        index: 0,
+        items: newItems,
+        shuffleEnabled: false,
+        shouldAssignIds: true,
+      },
+    });
+
+    // Set to play the song
+    queue.dispatch({
+      type: 'SET_INDEX',
+      payload: 0,
+    });
+
+    // Start playback - YouTube Music's automix will kick in naturally
+    await new Promise((r) => setTimeout(r, 150));
+    api?.playVideo();
+  });
+
   window.ipcRenderer.on('peard:pause', (_) => {
     api?.pauseVideo();
   });
@@ -222,13 +282,13 @@ async function onApiLoaded() {
                 index:
                   queueInsertPosition === 'INSERT_AFTER_CURRENT_VIDEO'
                     ? queueItems.findIndex(
-                        (it) =>
-                          (
-                            it.playlistPanelVideoRenderer ||
-                            it.playlistPanelVideoWrapperRenderer
-                              ?.primaryRenderer.playlistPanelVideoRenderer
-                          )?.selected,
-                      ) + 1 || queueItemsLength
+                      (it) =>
+                        (
+                          it.playlistPanelVideoRenderer ||
+                          it.playlistPanelVideoWrapperRenderer
+                            ?.primaryRenderer.playlistPanelVideoRenderer
+                        )?.selected,
+                    ) + 1 || queueItemsLength
                     : queueItemsLength,
                 items: result.queueDatas
                   .map((it) =>
@@ -311,7 +371,79 @@ async function onApiLoaded() {
     },
   );
 
-  const video = document.querySelector('video')!;
+  window.ipcRenderer.on('peard:get-playlists', async () => {
+    const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
+    if (!app) return;
+
+    try {
+      const result = await app.networkManager.fetch('/browse', {
+        browseId: 'FEmusic_liked_playlists',
+      });
+
+      window.ipcRenderer.send('peard:get-playlists-response', result);
+    } catch (error) {
+      window.ipcRenderer.send('peard:get-playlists-response', null);
+    }
+  });
+
+  window.ipcRenderer.on('peard:play-playlist', async (_, playlistId: string) => {
+    const app = document.querySelector<MusicPlayerAppElement>('ytmusic-app');
+    if (!app) return;
+
+    console.log('[Playlist] Starting to play playlist:', playlistId);
+
+    // Navigate to the playlist (browseId works directly)
+    app.navigate(playlistId);
+    console.log('[Playlist] Navigated to playlist');
+
+    // Poll for the play button to appear (max 5 seconds)
+    let buttonToClick: HTMLElement | null = null;
+    let attempts = 0;
+    const maxAttempts = 25; // 25 attempts * 200ms = 5 seconds max
+
+    while (!buttonToClick && attempts < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 200));
+      attempts++;
+
+      // First priority: the play button renderer itself (has role="button")
+      buttonToClick = document.querySelector<HTMLElement>('ytmusic-play-button-renderer[role="button"]');
+
+      // Second priority: explicit play button inside header
+      if (!buttonToClick) {
+        const playRenderer = document.querySelector('ytmusic-responsive-header-renderer ytmusic-play-button-renderer');
+        if (playRenderer) {
+          buttonToClick = playRenderer as HTMLElement;
+        }
+      }
+
+      // Third priority: any play button with nested button element
+      if (!buttonToClick) {
+        buttonToClick = document.querySelector<HTMLElement>('ytmusic-play-button-renderer button');
+      }
+
+      // Last resort: shuffle button
+      if (!buttonToClick) {
+        buttonToClick =
+          document.querySelector<HTMLElement>('[aria-label*="Shuffle"]') ||
+          document.querySelector<HTMLElement>('ytmusic-menu-renderer [aria-label*="Shuffle"]');
+      }
+    }
+
+    console.log('[Playlist] Button search attempts:', attempts, 'Button found:', !!buttonToClick);
+
+    if (buttonToClick) {
+      // Wait an additional moment for playlist data to fully load
+      console.log('[Playlist] Waiting for playlist data to load...');
+      await new Promise((r) => setTimeout(r, 500));
+
+      console.log('[Playlist] Clicking button:', buttonToClick.getAttribute('aria-label'));
+      buttonToClick.click();
+    } else {
+      console.warn('[Playlist] No play/shuffle button found after', attempts, 'attempts');
+    }
+  });
+
+  const video = document.querySelector('video')!
   const audioContext = new AudioContext();
   const audioSource = audioContext.createMediaElementSource(video);
   audioSource.connect(audioContext.destination);
@@ -394,14 +526,12 @@ async function onApiLoaded() {
     const style = document.createElement('style');
     style.textContent = `
       ytmusic-player-bar[is-mweb-player-bar-modernization-enabled] .middle-controls-buttons.ytmusic-player-bar, #like-button-renderer {
-        display: ${
-          likeButtonsOptions === 'hide' ? 'none' : 'inherit'
-        } !important;
+        display: ${likeButtonsOptions === 'hide' ? 'none' : 'inherit'
+      } !important;
       }
       ytmusic-player-bar[is-mweb-player-bar-modernization-enabled] .middle-controls.ytmusic-player-bar {
-        justify-content: ${
-          likeButtonsOptions === 'hide' ? 'flex-start' : 'space-between'
-        } !important;
+        justify-content: ${likeButtonsOptions === 'hide' ? 'flex-start' : 'space-between'
+      } !important;
       }`;
 
     document.head.appendChild(style);
@@ -412,7 +542,7 @@ async function onApiLoaded() {
  * Original still using ES5, so we need to define custom elements using ES5 style
  */
 const definePearTransElements = () => {
-  const PearTrans = function () {};
+  const PearTrans = function () { };
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   PearTrans.prototype = Object.create(HTMLElement.prototype);
   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access

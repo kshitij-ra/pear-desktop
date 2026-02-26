@@ -1,23 +1,26 @@
-import { createServer as createHttpServer } from 'node:http';
-import { createServer as createHttpsServer } from 'node:https';
-import { readFileSync } from 'node:fs';
+import { getSongControls } from '@/providers/song-controls';
 
-import { jwt } from 'hono/jwt';
 import { OpenAPIHono as Hono } from '@hono/zod-openapi';
-import { cors } from 'hono/cors';
 import { swaggerUI } from '@hono/swagger-ui';
-import { serve } from '@hono/node-server';
 import { createNodeWebSocket } from '@hono/node-ws';
 
-import { registerCallback } from '@/providers/song-info';
+import { getSongInfo, registerCallback } from '@/providers/song-info';
 import { createBackend } from '@/utils';
 
-import { JWTPayloadSchema } from './scheme';
 import { registerAuth, registerControl, registerWebsocket } from './routes';
+import {
+  corsMiddleware,
+  privateNetworkMiddleware,
+  jwtAuthMiddleware,
+  authorizationMiddleware
+} from './middleware';
+import { createAndStartServer } from './server';
 
 import { APPLICATION_NAME } from '@/i18n';
 
-import { type APIServerConfig, AuthStrategy } from '../config';
+import { type APIServerConfig } from '../config';
+
+
 
 import type { BackendType } from './types';
 import type {
@@ -31,6 +34,7 @@ export const backend = createBackend<BackendType, APIServerConfig>({
     const config = await ctx.getConfig();
 
     this.init(ctx);
+    this.songInfo = getSongInfo() ?? undefined;
     registerCallback((songInfo) => {
       this.songInfo = songInfo;
     });
@@ -41,7 +45,20 @@ export const backend = createBackend<BackendType, APIServerConfig>({
       ctx.ipc.send('peard:setup-repeat-changed-listener');
       ctx.ipc.send('peard:setup-like-changed-listener');
       ctx.ipc.send('peard:setup-volume-changed-listener');
+      ctx.ipc.send('peard:setup-volume-changed-listener');
       ctx.ipc.send('peard:setup-shuffle-changed-listener');
+      ctx.ipc.send('peard:setup-queue-changed-listener');
+
+      const controller = getSongControls(ctx.window);
+      controller.requestShuffleInformation();
+
+      ctx.window.webContents
+        .executeJavaScript(
+          'document.querySelector("#like-button-renderer")?.likeStatus',
+        )
+        .then((like) => {
+          this.likeState = like;
+        });
     });
 
     ctx.ipc.on(
@@ -52,6 +69,16 @@ export const backend = createBackend<BackendType, APIServerConfig>({
     ctx.ipc.on(
       'peard:volume-changed',
       (newVolumeState: VolumeState) => (this.volumeState = newVolumeState),
+    );
+
+    ctx.ipc.on(
+      'peard:like-changed',
+      (like: LikeType) => (this.likeState = like),
+    );
+
+    ctx.ipc.on(
+      'peard:shuffle-changed',
+      (newShuffle: boolean) => (this.shuffle = newShuffle),
     );
 
     this.run(config);
@@ -85,39 +112,16 @@ export const backend = createBackend<BackendType, APIServerConfig>({
       app: this.app,
     });
 
-    this.app.use('*', cors());
+    // Apply CORS and private network middlewares globally
+    this.app.use('*', corsMiddleware());
+    this.app.use('*', privateNetworkMiddleware);
 
-    // for web remote control
-    this.app.use('*', async (ctx, next) => {
-      ctx.header('Access-Control-Request-Private-Network', 'true');
-      await next();
-    });
-
-    // middlewares
+    // Apply authentication and authorization middlewares to API routes
     this.app.use('/api/*', async (ctx, next) => {
       const config = await backendCtx.getConfig();
-
-      if (config.authStrategy !== AuthStrategy.NONE) {
-        return await jwt({
-          secret: config.secret,
-        })(ctx, next);
-      }
-      await next();
+      return await jwtAuthMiddleware(config)(ctx, next);
     });
-    this.app.use('/api/*', async (ctx, next) => {
-      const result = await JWTPayloadSchema.spa(await ctx.get('jwtPayload'));
-      const config = await backendCtx.getConfig();
-
-      const isAuthorized =
-        config.authStrategy === AuthStrategy.NONE ||
-        (result.success && config.authorizedClients.includes(result.data.id));
-      if (!isAuthorized) {
-        ctx.status(401);
-        return ctx.body('Unauthorized');
-      }
-
-      return await next();
-    });
+    this.app.use('/api/*', authorizationMiddleware(async () => await backendCtx.getConfig()));
 
     // routes
     registerControl(
@@ -132,7 +136,16 @@ export const backend = createBackend<BackendType, APIServerConfig>({
       () => this.volumeState,
     );
     registerAuth(this.app, backendCtx);
-    registerWebsocket(this.app, backendCtx, ws);
+    registerWebsocket(
+      this.app,
+      backendCtx,
+      ws,
+      () => this.songInfo,
+      () => this.currentRepeatMode ?? 'NONE',
+      () => this.shuffle ?? false,
+      () => this.likeState,
+      () => this.volumeState,
+    );
 
     // swagger
     this.app.openAPIRegistry.registerComponent(
@@ -159,6 +172,7 @@ export const backend = createBackend<BackendType, APIServerConfig>({
       ],
     });
 
+    // Swagger UI for API documentation
     this.app.get('/swagger', swaggerUI({ url: '/doc' }));
 
     this.injectWebSocket = ws.injectWebSocket.bind(this);
@@ -166,33 +180,10 @@ export const backend = createBackend<BackendType, APIServerConfig>({
   run(config) {
     if (!this.app) return;
 
-    try {
-      const serveOptions =
-        config.useHttps && config.certPath && config.keyPath
-          ? {
-              fetch: this.app.fetch.bind(this.app),
-              port: config.port,
-              hostname: config.hostname,
-              createServer: createHttpsServer,
-              serverOptions: {
-                key: readFileSync(config.keyPath),
-                cert: readFileSync(config.certPath),
-              },
-            }
-          : {
-              fetch: this.app.fetch.bind(this.app),
-              port: config.port,
-              hostname: config.hostname,
-              createServer: createHttpServer,
-            };
+    this.server = createAndStartServer(this.app, config);
 
-      this.server = serve(serveOptions);
-
-      if (this.injectWebSocket && this.server) {
-        this.injectWebSocket(this.server);
-      }
-    } catch (err) {
-      console.error(err);
+    if (this.injectWebSocket && this.server) {
+      this.injectWebSocket(this.server);
     }
   },
   end() {

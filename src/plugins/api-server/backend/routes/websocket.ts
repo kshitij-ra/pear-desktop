@@ -12,7 +12,7 @@ import { API_VERSION } from '../api-version';
 
 import type { WSContext } from 'hono/ws';
 import type { Context, Next } from 'hono';
-import type { RepeatMode, VolumeState } from '@/types/datahost-get-state';
+import type { LikeType, RepeatMode, VolumeState } from '@/types/datahost-get-state';
 import type { HonoApp } from '../types';
 import type { BackendContext } from '@/types/contexts';
 import type { APIServerConfig } from '@/plugins/api-server/config';
@@ -25,6 +25,8 @@ enum DataTypes {
   VolumeChanged = 'VOLUME_CHANGED',
   RepeatChanged = 'REPEAT_CHANGED',
   ShuffleChanged = 'SHUFFLE_CHANGED',
+  QueueChanged = 'QUEUE_CHANGED',
+  LikeChanged = 'LIKE_CHANGED',
 }
 
 type PlayerState = {
@@ -35,18 +37,19 @@ type PlayerState = {
   volume: number;
   repeat: RepeatMode;
   shuffle: boolean;
+  likeStatus: LikeType | undefined;
 };
 
 export const register = (
   app: HonoApp,
   { ipc }: BackendContext<APIServerConfig>,
   { upgradeWebSocket }: NodeWebSocket,
+  getSongInfo: () => SongInfo | undefined,
+  getRepeatMode: () => RepeatMode,
+  getShuffle: () => boolean,
+  getLikeState: () => LikeType | undefined,
+  getVolumeState: () => VolumeState | undefined,
 ) => {
-  let volumeState: VolumeState | undefined = undefined;
-  let repeat: RepeatMode = 'NONE';
-  let shuffle = false;
-  let lastSongInfo: SongInfo | undefined = undefined;
-
   const sockets = new Set<WSContext<WebSocket>>();
 
   const send = (type: DataTypes, state: Partial<PlayerState>) => {
@@ -60,11 +63,13 @@ export const register = (
     volumeState,
     repeat,
     shuffle,
+    likeStatus,
   }: {
     songInfo?: SongInfo;
     volumeState?: VolumeState;
     repeat: RepeatMode;
     shuffle: boolean;
+    likeStatus?: LikeType;
   }): PlayerState => ({
     song: songInfo,
     isPlaying: songInfo ? !songInfo.isPaused : false,
@@ -73,11 +78,16 @@ export const register = (
     volume: volumeState?.state ?? 100,
     repeat,
     shuffle,
+    likeStatus,
   });
 
   registerCallback((songInfo, event) => {
     if (event === SongInfoEvent.VideoSrcChanged) {
-      send(DataTypes.VideoChanged, { song: songInfo, position: 0 });
+      send(DataTypes.VideoChanged, {
+        song: songInfo,
+        position: 0,
+        isPlaying: !songInfo.isPaused,
+      });
     }
 
     if (event === SongInfoEvent.PlayOrPaused) {
@@ -90,21 +100,17 @@ export const register = (
     if (event === SongInfoEvent.TimeChanged) {
       send(DataTypes.PositionChanged, { position: songInfo.elapsedSeconds });
     }
-
-    lastSongInfo = { ...songInfo };
   });
 
   ipc.on('peard:volume-changed', (newVolumeState: VolumeState) => {
-    volumeState = newVolumeState;
     send(DataTypes.VolumeChanged, {
-      volume: volumeState.state,
-      muted: volumeState.isMuted,
+      volume: newVolumeState.state,
+      muted: newVolumeState.isMuted,
     });
   });
 
   ipc.on('peard:repeat-changed', (mode: RepeatMode) => {
-    repeat = mode;
-    send(DataTypes.RepeatChanged, { repeat });
+    send(DataTypes.RepeatChanged, { repeat: mode });
   });
 
   ipc.on('peard:seeked', (t: number) => {
@@ -112,8 +118,15 @@ export const register = (
   });
 
   ipc.on('peard:shuffle-changed', (newShuffle: boolean) => {
-    shuffle = newShuffle;
-    send(DataTypes.ShuffleChanged, { shuffle });
+    send(DataTypes.ShuffleChanged, { shuffle: newShuffle });
+  });
+
+  ipc.on('peard:queue-changed', () => {
+    send(DataTypes.QueueChanged, {});
+  });
+
+  ipc.on('peard:like-changed', (like: LikeType) => {
+    send(DataTypes.LikeChanged, { likeStatus: like });
   });
 
   app.openapi(
@@ -137,10 +150,11 @@ export const register = (
           JSON.stringify({
             type: DataTypes.PlayerInfo,
             ...createPlayerState({
-              songInfo: lastSongInfo,
-              volumeState,
-              repeat,
-              shuffle,
+              songInfo: getSongInfo(),
+              volumeState: getVolumeState(),
+              repeat: getRepeatMode(),
+              shuffle: getShuffle(),
+              likeStatus: getLikeState(),
             }),
           }),
         );

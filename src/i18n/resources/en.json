@@ -353,6 +353,44 @@
         }
       }
     },
+    "web-ui": {
+      "description": "Adds a web UI to control the player",
+      "menu": {
+        "hostname": {
+          "label": "Hostname"
+        },
+        "port": {
+          "label": "Port"
+        },
+        "https": {
+          "label": "HTTPS & Certificates",
+          "submenu": {
+            "enable-https": {
+              "label": "Enable HTTPS"
+            },
+            "cert": {
+              "label": "Certificate file (.crt/.pem)",
+              "dialogTitle": "Select HTTPS certificate file"
+            },
+            "key": {
+              "label": "Private key file (.key/.pem)",
+              "dialogTitle": "Select HTTPS private key file"
+            }
+          }
+        }
+      },
+      "name": "Web UI",
+      "prompt": {
+        "hostname": {
+          "label": "Enter the hostname (like 0.0.0.0) for the web UI:",
+          "title": "Hostname"
+        },
+        "port": {
+          "label": "Enter the port for the web UI:",
+          "title": "Port"
+        }
+      }
+    },
     "audio-compressor": {
       "description": "Apply compression to audio (lowers the volume of the loudest parts of the signal and raises the volume of the softest parts)",
       "name": "Audio Compressor"

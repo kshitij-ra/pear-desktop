@@ -188,9 +188,11 @@ export const registerCallback = (callback: SongInfoCallback) => {
   callbacks.add(callback);
 };
 
+let songInfo: SongInfo | null = null;
+export const getSongInfo = () => songInfo;
+
 const registerProvider = (win: BrowserWindow) => {
   const dataMutex = new Mutex();
-  let songInfo: SongInfo | null = null;
 
   // This will be called when the song-info-front finds a new request with song data
   ipcMain.on('peard:video-src-changed', async (_, data: GetPlayerResponse) => {
